@@ -6,6 +6,15 @@ using YoutubeChannelFinder.Infrastructure.Logging;
 using YoutubeChannelFinder.Infrastructure.Progress;
 using YoutubeChannelFinder.Infrastructure.Persistence;
 using YoutubeChannelFinder.Infrastructure.UI;
+using YoutubeChannelFinder.Modules.FetchHomepage;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Linq;
+
+using PipelineInput = string;
+using PipelineOutput = YoutubeChannelFinder.Modules.FetchHomepage.FetchHomepageResult;
 
 namespace YoutubeChannelFinder;
 
@@ -34,23 +43,11 @@ internal static class Program
         var globalSemaphore = new GlobalSemaphore(maxConcurrency: 2);
 
         // ===== Modules (decorated) =====
-        var uppercase =
-            new LoggedTimedModule<string, string>(
-                new RetryTimedModule<string, string>(
-                    new ConcurrencyLimitedModule<string, string>(
-                        new UppercaseModule(),
-                        moduleSemaphore,
-                        maxConcurrency: 2),
-                    maxRetries: 3,
-                    timeout: TimeSpan.FromSeconds(30)),
-                logger,
-                activeJobs);
-
-        var length =
-            new LoggedTimedModule<string, int>(
-                new RetryTimedModule<string, int>(
-                    new ConcurrencyLimitedModule<string, int>(
-                        new LengthModule(),
+        var fetchHomepage =
+            new LoggedTimedModule<PipelineInput, PipelineOutput>(
+                new RetryTimedModule<PipelineInput, PipelineOutput>(
+                    new ConcurrencyLimitedModule<PipelineInput, PipelineOutput>(
+                        new FetchHomepageModule(),
                         moduleSemaphore,
                         maxConcurrency: 2),
                     maxRetries: 3,
@@ -61,9 +58,10 @@ internal static class Program
         // ===== Pipeline steps =====
         var steps = new List<IPipelineStep>
         {
-            new PipelineStep<string, string>(uppercase),
-            new PipelineStep<string, int>(length)
+            new PipelineStep<PipelineInput, PipelineOutput>(fetchHomepage)
         };
+
+        // ===== Pipeline validation - Set expected Pipeline Input/Output types=====
 
         PipelineValidator.Validate(steps, typeof(string));
         Console.WriteLine("Pipeline validation: OK");
@@ -78,7 +76,7 @@ internal static class Program
             globalSemaphore);
 
         // ===== Inputs =====
-        var inputs = new[]
+        var inputs = new List<string>
         {
             "example.com",
             "dotnet.microsoft.com",
@@ -88,7 +86,7 @@ internal static class Program
             "github.io"
         };
 
-        var progress = new ProgressTracker(inputs.Length);
+        var progress = new ProgressTracker(inputs.Count);
 
         var layout = new SpectreLayout(
             activeJobs,
@@ -119,8 +117,7 @@ internal static class Program
                 {
                     try
                     {
-                        // IMPORTANT: orchestrator now RETURNS a value
-                        await scheduler.RunAsync<string, int>(input, context);
+                        await scheduler.RunAsync<PipelineInput, PipelineOutput>(input, context);
                     }
                     finally
                     {

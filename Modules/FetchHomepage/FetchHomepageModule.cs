@@ -2,60 +2,90 @@
 using System.Net.Http;
 using System.Threading.Tasks;
 using YoutubeChannelFinder.Core;
+using YoutubeChannelFinder.Infrastructure.Http;
 
 namespace YoutubeChannelFinder.Modules.FetchHomepage;
 
-public sealed class FetchHomepageModule : IPipelineModule<string, string>
+public sealed class FetchHomepageModule
+    : IPipelineModule<string, FetchHomepageResult>
 {
-    private readonly HttpClient _httpClient;
-
-    public FetchHomepageModule(HttpClient httpClient)
-    {
-        _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
-    }
-
     public string Name => "FetchHomepage";
 
-    public async Task<string> ExecuteAsync(
+    public async Task<FetchHomepageResult> ExecuteAsync(
         string input,
         PipelineContext context)
     {
         if (string.IsNullOrWhiteSpace(input))
-            throw new ArgumentException("Input cannot be empty", nameof(input));
+        {
+            return FetchHomepageResult.Fail(
+                url: input,
+                statusCode: null,
+                error: "Input domain is empty");
+        }
 
-        var url = NormalizeUrl(input);
+        string url;
+        try
+        {
+            url = NormalizeUrl(input);
+        }
+        catch (Exception ex)
+        {
+            return FetchHomepageResult.Fail(
+                url: input,
+                statusCode: null,
+                error: ex.Message);
+        }
 
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.UserAgent.ParseAdd(
-            "Mozilla/5.0 (compatible; YoutubeChannelFinder/1.0)");
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            using var response = await HttpClientProvider.Client.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                context.CancellationToken);
 
-        using var response = await _httpClient.SendAsync(
-            request,
-            HttpCompletionOption.ResponseHeadersRead,
-            context.CancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                return FetchHomepageResult.Fail(
+                    url,
+                    (int)response.StatusCode,
+                    $"HTTP {(int)response.StatusCode} {response.ReasonPhrase}");
+            }
 
-        response.EnsureSuccessStatusCode();
+            var content = await response.Content.ReadAsStringAsync(
+                context.CancellationToken);
 
-        var html = await response.Content.ReadAsStringAsync(
-            context.CancellationToken);
-
-        // Attempt-scoped storage (safe with Option A)
-        context.Bag["homepage_url"] = url.ToString();
-        context.Bag["homepage_html"] = html;
-
-        return html;
+            return FetchHomepageResult.Ok(
+                url: url,
+                html: content,
+                statusCode: (int)response.StatusCode,
+                contentType: response.Content.Headers.ContentType?.ToString() ?? "",
+                contentLength: content.Length);
+        }
+        catch (OperationCanceledException)
+        {
+            return FetchHomepageResult.Fail(
+                url,
+                null,
+                "Request cancelled");
+        }
+        catch (Exception ex)
+        {
+            return FetchHomepageResult.Fail(
+                url,
+                null,
+                ex.Message);
+        }
     }
 
-    private static Uri NormalizeUrl(string input)
+    private static string NormalizeUrl(string input)
     {
-        // Absolute URL already
         if (Uri.TryCreate(input, UriKind.Absolute, out var absolute))
-            return absolute;
+            return absolute.ToString();
 
-        // Try https:// + input
-        if (Uri.TryCreate($"https://{input}", UriKind.Absolute, out var https))
-            return https;
+        if (Uri.TryCreate("https://" + input, UriKind.Absolute, out var https))
+            return https.ToString();
 
-        throw new InvalidOperationException($"Invalid URL input: {input}");
+        throw new InvalidOperationException($"Invalid URL: {input}");
     }
 }

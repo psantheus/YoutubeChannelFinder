@@ -1,4 +1,6 @@
-﻿namespace YoutubeChannelFinder.Infrastructure.Logging;
+﻿using System;
+
+namespace YoutubeChannelFinder.Infrastructure.Logging;
 
 public sealed class ConsolePipelineLogger : IPipelineLogger
 {
