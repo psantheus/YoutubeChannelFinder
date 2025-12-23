@@ -4,6 +4,7 @@ using YoutubeChannelFinder.Infrastructure.Concurrency;
 using YoutubeChannelFinder.Infrastructure.Decorators;
 using YoutubeChannelFinder.Infrastructure.Logging;
 using YoutubeChannelFinder.Infrastructure.Progress;
+using YoutubeChannelFinder.Infrastructure.Persistence;
 using YoutubeChannelFinder.Infrastructure.UI;
 
 namespace YoutubeChannelFinder;
@@ -12,14 +13,27 @@ internal static class Program
 {
     private static async Task Main(string[] args)
     {
-        Console.WriteLine("Pipeline Engine – Smoke Test");
+        Console.WriteLine("YoutubeChannelFinder – Smoke Test");
         Console.WriteLine("--------------------------------");
 
+        // ===== Run / audit setup =====
+        var runId = Guid.NewGuid();
+        Console.WriteLine($"Pipeline RunId: {runId}");
+
+        var auditWriter = new FileAuditWriter(
+            root: "Outputs",
+            runId: runId);
+
+        // ===== Logging / UI =====
         var logBuffer = new LogBuffer();
         var logger = new ConsolePipelineLogger(logBuffer);
         var activeJobs = new ActiveJobTracker();
-        var moduleSemaphore = new ModuleSemaphore();
 
+        // ===== Concurrency =====
+        var moduleSemaphore = new ModuleSemaphore();
+        var globalSemaphore = new GlobalSemaphore(maxConcurrency: 2);
+
+        // ===== Modules (decorated) =====
         var uppercase =
             new LoggedTimedModule<string, string>(
                 new RetryTimedModule<string, string>(
@@ -27,8 +41,8 @@ internal static class Program
                         new UppercaseModule(),
                         moduleSemaphore,
                         maxConcurrency: 2),
-                    3,
-                    TimeSpan.FromMilliseconds(30000)),
+                    maxRetries: 3,
+                    timeout: TimeSpan.FromSeconds(30)),
                 logger,
                 activeJobs);
 
@@ -39,54 +53,33 @@ internal static class Program
                         new LengthModule(),
                         moduleSemaphore,
                         maxConcurrency: 2),
-                    3,
-                    TimeSpan.FromMilliseconds(30000)),
+                    maxRetries: 3,
+                    timeout: TimeSpan.FromSeconds(30)),
                 logger,
                 activeJobs);
 
-        // Build pipeline steps
+        // ===== Pipeline steps =====
         var steps = new List<IPipelineStep>
         {
             new PipelineStep<string, string>(uppercase),
             new PipelineStep<string, int>(length)
         };
 
-        // Validate pipeline at startup (fail fast)
         PipelineValidator.Validate(steps, typeof(string));
         Console.WriteLine("Pipeline validation: OK");
 
-        var orchestrator = new PipelineOrchestrator(steps);
-        var globalSemaphore = new GlobalSemaphore(maxConcurrency: 2);
-        var scheduler = new PipelineScheduler(orchestrator, globalSemaphore);
+        // ===== Orchestrator + Scheduler =====
+        var orchestrator = new PipelineOrchestrator(
+            steps,
+            auditWriter);
 
-        using var cts = new CancellationTokenSource();
+        var scheduler = new PipelineScheduler(
+            orchestrator,
+            globalSemaphore);
 
+        // ===== Inputs =====
         var inputs = new[]
         {
-            "example.com",
-            "dotnet.microsoft.com",
-            "github.com",
-            "openai.com",
-            "microsoft.com",
-            "github.io",
-            "example.com",
-            "dotnet.microsoft.com",
-            "github.com",
-            "openai.com",
-            "microsoft.com",
-            "github.io",
-            "example.com",
-            "dotnet.microsoft.com",
-            "github.com",
-            "openai.com",
-            "microsoft.com",
-            "github.io",
-            "example.com",
-            "dotnet.microsoft.com",
-            "github.com",
-            "openai.com",
-            "microsoft.com",
-            "github.io",
             "example.com",
             "dotnet.microsoft.com",
             "github.com",
@@ -97,10 +90,15 @@ internal static class Program
 
         var progress = new ProgressTracker(inputs.Length);
 
-        var layout = new SpectreLayout(activeJobs, progress, logBuffer);
+        var layout = new SpectreLayout(
+            activeJobs,
+            progress,
+            logBuffer);
 
+        using var cts = new CancellationTokenSource();
         using var uiCts = new CancellationTokenSource();
 
+        // ===== UI + execution =====
         await layout.RunAsync(async () =>
         {
             logger.Info("Pipeline execution started", Guid.Empty);
@@ -121,13 +119,14 @@ internal static class Program
                 {
                     try
                     {
-                        await scheduler.RunAsync(input, context);
+                        // IMPORTANT: orchestrator now RETURNS a value
+                        await scheduler.RunAsync<string, int>(input, context);
                     }
                     finally
                     {
                         activeJobs.Complete(context.CorrelationId);
                         progress.MarkCompleted();
-                        layout.Refresh();   // ← THIS is what you wanted
+                        layout.Refresh();
                     }
                 });
             });
