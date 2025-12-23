@@ -1,6 +1,8 @@
-﻿namespace YoutubeChannelFinder.Modules.FetchHomepage;
+﻿using YoutubeChannelFinder.Core;
 
-public sealed class FetchHomepageResult
+namespace YoutubeChannelFinder.Modules.FetchHomepage;
+
+public sealed class FetchHomepageResult : IFailableResult
 {
     public bool Success { get; init; }
 

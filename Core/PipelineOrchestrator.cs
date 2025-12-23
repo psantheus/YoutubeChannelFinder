@@ -42,6 +42,26 @@ public sealed class PipelineOrchestrator
                 {
                     current = await step.ExecuteAsync(current!, context);
 
+                    // 🔴 NEW: detect domain failure (non-exception)
+                    if (current is IFailableResult failable && !failable.Success)
+                    {
+                        // Log module failure
+                        _audit.WriteModuleFailure(
+                            context.InputId,
+                            step.Name,
+                            new Exception(failable.Error ?? "Module reported failure"));
+
+                        // Log input-level failure
+                        _audit.WriteInputSummary(
+                            context.InputId,
+                            succeededModules,
+                            failedModule: step.Name,
+                            error: new Exception(failable.Error ?? "Module reported failure"));
+
+                        // Stop pipeline for this input
+                        return default!;
+                    }
+
                     // Persist successful output
                     _audit.WriteModuleSuccess(
                         context.InputId,
@@ -52,7 +72,7 @@ public sealed class PipelineOrchestrator
                 }
                 catch (Exception ex)
                 {
-                    // Persist module failure
+                    // Persist module failure (exceptional)
                     _audit.WriteModuleFailure(
                         context.InputId,
                         step.Name,
@@ -69,7 +89,7 @@ public sealed class PipelineOrchestrator
                 }
             }
 
-            // Persist success summary
+            // Persist success summary (only reached if all modules succeeded)
             _audit.WriteInputSummary(
                 context.InputId,
                 succeededModules,
@@ -80,7 +100,6 @@ public sealed class PipelineOrchestrator
         }
         catch
         {
-            // Do not swallow exceptions
             throw;
         }
     }
